@@ -1,0 +1,763 @@
+// Copyright (c) 2017-2019 The Bitum developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+package main
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+
+	"github.com/bitum-project/politeia/bitumplugin"
+	pd "github.com/bitum-project/politeia/politeiad/api/v1"
+	"github.com/bitum-project/politeia/politeiad/cache"
+	cms "github.com/bitum-project/politeia/politeiawww/api/cms/v1"
+	www "github.com/bitum-project/politeia/politeiawww/api/www/v1"
+	"github.com/bitum-project/politeia/politeiawww/cmsdatabase"
+)
+
+func convertCastVoteReplyFromBitumPlugin(cvr bitumplugin.CastVoteReply) www.CastVoteReply {
+	return www.CastVoteReply{
+		ClientSignature: cvr.ClientSignature,
+		Signature:       cvr.Signature,
+		Error:           cvr.Error,
+	}
+}
+
+func convertCastVoteFromWWW(b www.CastVote) bitumplugin.CastVote {
+	return bitumplugin.CastVote{
+		Token:     b.Token,
+		Ticket:    b.Ticket,
+		VoteBit:   b.VoteBit,
+		Signature: b.Signature,
+	}
+}
+
+func convertBallotFromWWW(b www.Ballot) bitumplugin.Ballot {
+	br := bitumplugin.Ballot{
+		Votes: make([]bitumplugin.CastVote, 0, len(b.Votes)),
+	}
+	for _, v := range b.Votes {
+		br.Votes = append(br.Votes, convertCastVoteFromWWW(v))
+	}
+	return br
+}
+
+func convertBallotReplyFromBitumPlugin(b bitumplugin.BallotReply) www.BallotReply {
+	br := www.BallotReply{
+		Receipts: make([]www.CastVoteReply, 0, len(b.Receipts)),
+	}
+	for _, v := range b.Receipts {
+		br.Receipts = append(br.Receipts,
+			convertCastVoteReplyFromBitumPlugin(v))
+	}
+	return br
+}
+
+func convertVoteOptionFromWWW(vo www.VoteOption) bitumplugin.VoteOption {
+	return bitumplugin.VoteOption{
+		Id:          vo.Id,
+		Description: vo.Description,
+		Bits:        vo.Bits,
+	}
+}
+
+func convertVoteOptionsFromWWW(vo []www.VoteOption) []bitumplugin.VoteOption {
+	vor := make([]bitumplugin.VoteOption, 0, len(vo))
+	for _, v := range vo {
+		vor = append(vor, convertVoteOptionFromWWW(v))
+	}
+	return vor
+}
+
+func convertVoteFromWWW(v www.Vote) bitumplugin.Vote {
+	return bitumplugin.Vote{
+		Token:            v.Token,
+		Mask:             v.Mask,
+		Duration:         v.Duration,
+		QuorumPercentage: v.QuorumPercentage,
+		PassPercentage:   v.PassPercentage,
+		Options:          convertVoteOptionsFromWWW(v.Options),
+	}
+}
+
+func convertAuthorizeVoteFromWWW(av www.AuthorizeVote) bitumplugin.AuthorizeVote {
+	return bitumplugin.AuthorizeVote{
+		Action:    av.Action,
+		Token:     av.Token,
+		PublicKey: av.PublicKey,
+		Signature: av.Signature,
+	}
+}
+
+func convertStartVoteFromWWW(sv www.StartVote) bitumplugin.StartVote {
+	return bitumplugin.StartVote{
+		PublicKey: sv.PublicKey,
+		Vote:      convertVoteFromWWW(sv.Vote),
+		Signature: sv.Signature,
+	}
+}
+
+func convertPropStatusFromWWW(s www.PropStatusT) pd.RecordStatusT {
+	switch s {
+	case www.PropStatusNotFound:
+		return pd.RecordStatusNotFound
+	case www.PropStatusNotReviewed:
+		return pd.RecordStatusNotReviewed
+	case www.PropStatusCensored:
+		return pd.RecordStatusCensored
+	case www.PropStatusPublic:
+		return pd.RecordStatusPublic
+	case www.PropStatusAbandoned:
+		return pd.RecordStatusArchived
+	}
+	return pd.RecordStatusInvalid
+}
+
+func convertPropFileFromWWW(f www.File) pd.File {
+	return pd.File{
+		Name:    f.Name,
+		MIME:    f.MIME,
+		Digest:  f.Digest,
+		Payload: f.Payload,
+	}
+}
+
+func convertPropFilesFromWWW(f []www.File) []pd.File {
+	files := make([]pd.File, 0, len(f))
+	for _, v := range f {
+		files = append(files, convertPropFileFromWWW(v))
+	}
+	return files
+}
+
+func convertPropStatusFromPD(s pd.RecordStatusT) www.PropStatusT {
+	switch s {
+	case pd.RecordStatusNotFound:
+		return www.PropStatusNotFound
+	case pd.RecordStatusNotReviewed:
+		return www.PropStatusNotReviewed
+	case pd.RecordStatusCensored:
+		return www.PropStatusCensored
+	case pd.RecordStatusPublic:
+		return www.PropStatusPublic
+	case pd.RecordStatusUnreviewedChanges:
+		return www.PropStatusUnreviewedChanges
+	case pd.RecordStatusArchived:
+		return www.PropStatusAbandoned
+	}
+	return www.PropStatusInvalid
+}
+
+func convertPropCensorFromPD(f pd.CensorshipRecord) www.CensorshipRecord {
+	return www.CensorshipRecord{
+		Token:     f.Token,
+		Merkle:    f.Merkle,
+		Signature: f.Signature,
+	}
+}
+
+func convertPropCensorFromWWW(f www.CensorshipRecord) pd.CensorshipRecord {
+	return pd.CensorshipRecord{
+		Token:     f.Token,
+		Merkle:    f.Merkle,
+		Signature: f.Signature,
+	}
+}
+
+func convertErrorStatusFromPD(s int) www.ErrorStatusT {
+	switch pd.ErrorStatusT(s) {
+	case pd.ErrorStatusInvalidFileDigest:
+		return www.ErrorStatusInvalidFileDigest
+	case pd.ErrorStatusInvalidBase64:
+		return www.ErrorStatusInvalidBase64
+	case pd.ErrorStatusInvalidMIMEType:
+		return www.ErrorStatusInvalidMIMEType
+	case pd.ErrorStatusUnsupportedMIMEType:
+		return www.ErrorStatusUnsupportedMIMEType
+	case pd.ErrorStatusInvalidRecordStatusTransition:
+		return www.ErrorStatusInvalidPropStatusTransition
+	case pd.ErrorStatusInvalidFilename:
+		return www.ErrorStatusInvalidFilename
+
+		// These cases are intentionally omitted because
+		// they are indicative of some internal server error,
+		// so ErrorStatusInvalid is returned.
+		//
+		//case pd.ErrorStatusInvalidRequestPayload
+		//case pd.ErrorStatusInvalidChallenge
+	}
+	return www.ErrorStatusInvalid
+}
+
+func convertPropStatusToState(status www.PropStatusT) www.PropStateT {
+	switch status {
+	case www.PropStatusNotReviewed, www.PropStatusUnreviewedChanges,
+		www.PropStatusCensored:
+		return www.PropStateUnvetted
+	case www.PropStatusPublic, www.PropStatusAbandoned:
+		return www.PropStateVetted
+	}
+	return www.PropStateInvalid
+}
+
+func convertPropStatusFromCache(s cache.RecordStatusT) www.PropStatusT {
+	switch s {
+	case cache.RecordStatusNotFound:
+		return www.PropStatusNotFound
+	case cache.RecordStatusNotReviewed:
+		return www.PropStatusNotReviewed
+	case cache.RecordStatusCensored:
+		return www.PropStatusCensored
+	case cache.RecordStatusPublic:
+		return www.PropStatusPublic
+	case cache.RecordStatusUnreviewedChanges:
+		return www.PropStatusUnreviewedChanges
+	case cache.RecordStatusArchived:
+		return www.PropStatusAbandoned
+	}
+	return www.PropStatusInvalid
+}
+
+func convertPropFromCache(r cache.Record) www.ProposalRecord {
+	// Decode markdown stream payloads
+	var bpm *BackendProposalMetadata
+	var msc []MDStreamChanges
+	for _, ms := range r.Metadata {
+		// General metadata
+		if ms.ID == mdStreamGeneral {
+			md, err := decodeBackendProposalMetadata([]byte(ms.Payload))
+			if err != nil {
+				log.Errorf("convertPropFromCache: decode BackedProposalMetadata "+
+					"'%v' token '%v': %v", ms, r.CensorshipRecord.Token, err)
+			}
+			bpm = md
+		}
+
+		// Status change metatdata
+		if ms.ID == mdStreamChanges {
+			md, err := decodeMDStreamChanges([]byte(ms.Payload))
+			if err != nil {
+				log.Errorf("convertPropFromCache: decode MDStreamChanges "+
+					"'%v' token '%v': %v", ms, r.CensorshipRecord.Token, err)
+			}
+			msc = md
+		}
+	}
+
+	// Compile proposal status change metadata
+	var (
+		changeMsg   string
+		publishedAt int64
+		censoredAt  int64
+		abandonedAt int64
+	)
+	for _, v := range msc {
+		// Overwrite change message because we only need to keep
+		// the most recent one.
+		changeMsg = v.StatusChangeMessage
+
+		switch convertPropStatusFromPD(v.NewStatus) {
+		case www.PropStatusPublic:
+			publishedAt = v.Timestamp
+		case www.PropStatusCensored:
+			censoredAt = v.Timestamp
+		case www.PropStatusAbandoned:
+			abandonedAt = v.Timestamp
+		}
+	}
+
+	// Convert files
+	var files []www.File
+	for _, f := range r.Files {
+		files = append(files,
+			www.File{
+				Name:    f.Name,
+				MIME:    f.MIME,
+				Digest:  f.Digest,
+				Payload: f.Payload,
+			})
+	}
+
+	status := convertPropStatusFromCache(r.Status)
+
+	// The UserId, Username, and NumComments fields are returned
+	// as zero values since a cache record does not contain that
+	// data.
+	return www.ProposalRecord{
+		Name:                bpm.Name,
+		State:               convertPropStatusToState(status),
+		Status:              status,
+		Timestamp:           r.Timestamp,
+		UserId:              "",
+		Username:            "",
+		PublicKey:           bpm.PublicKey,
+		Signature:           bpm.Signature,
+		Files:               files,
+		NumComments:         0,
+		Version:             r.Version,
+		StatusChangeMessage: changeMsg,
+		PublishedAt:         publishedAt,
+		CensoredAt:          censoredAt,
+		AbandonedAt:         abandonedAt,
+		CensorshipRecord: www.CensorshipRecord{
+			Token:     r.CensorshipRecord.Token,
+			Merkle:    r.CensorshipRecord.Merkle,
+			Signature: r.CensorshipRecord.Signature,
+		},
+	}
+}
+
+func convertNewCommentToBitumPlugin(nc www.NewComment) bitumplugin.NewComment {
+	return bitumplugin.NewComment{
+		Token:     nc.Token,
+		ParentID:  nc.ParentID,
+		Comment:   nc.Comment,
+		Signature: nc.Signature,
+		PublicKey: nc.PublicKey,
+	}
+}
+
+func convertLikeCommentToBitum(lc www.LikeComment) bitumplugin.LikeComment {
+	return bitumplugin.LikeComment{
+		Token:     lc.Token,
+		CommentID: lc.CommentID,
+		Action:    lc.Action,
+		Signature: lc.Signature,
+		PublicKey: lc.PublicKey,
+	}
+}
+
+func convertLikeCommentFromBitum(lc bitumplugin.LikeComment) www.LikeComment {
+	return www.LikeComment{
+		Token:     lc.Token,
+		CommentID: lc.CommentID,
+		Action:    lc.Action,
+		Signature: lc.Signature,
+		PublicKey: lc.PublicKey,
+	}
+}
+
+func convertCensorCommentToBitum(cc www.CensorComment) bitumplugin.CensorComment {
+	return bitumplugin.CensorComment{
+		Token:     cc.Token,
+		CommentID: cc.CommentID,
+		Reason:    cc.Reason,
+		Signature: cc.Signature,
+		PublicKey: cc.PublicKey,
+	}
+}
+
+func convertCommentFromBitum(c bitumplugin.Comment) www.Comment {
+	// ResultVotes, UserID, and Username are filled in as zero
+	// values since a cache comment does not contain this data.
+	return www.Comment{
+		Token:       c.Token,
+		ParentID:    c.ParentID,
+		Comment:     c.Comment,
+		Signature:   c.Signature,
+		PublicKey:   c.PublicKey,
+		CommentID:   c.CommentID,
+		Receipt:     c.Receipt,
+		Timestamp:   c.Timestamp,
+		ResultVotes: 0,
+		UserID:      "",
+		Username:    "",
+		Censored:    c.Censored,
+	}
+}
+
+func convertPluginToCache(p Plugin) cache.Plugin {
+	settings := make([]cache.PluginSetting, 0, len(p.Settings))
+	for _, s := range p.Settings {
+		settings = append(settings, cache.PluginSetting{
+			Key:   s.Key,
+			Value: s.Value,
+		})
+	}
+	return cache.Plugin{
+		ID:       p.ID,
+		Version:  p.Version,
+		Settings: settings,
+	}
+}
+
+func convertAuthVoteFromBitum(dav bitumplugin.AuthorizeVote) (www.AuthorizeVote, www.AuthorizeVoteReply) {
+	av := www.AuthorizeVote{
+		Action:    dav.Action,
+		Token:     dav.Token,
+		Signature: dav.Signature,
+		PublicKey: dav.PublicKey,
+	}
+
+	avr := www.AuthorizeVoteReply{
+		Action:  dav.Action,
+		Receipt: dav.Receipt,
+	}
+
+	return av, avr
+}
+
+func convertStartVoteFromBitum(sv bitumplugin.StartVote) www.StartVote {
+	opts := make([]www.VoteOption, 0, len(sv.Vote.Options))
+	for _, v := range sv.Vote.Options {
+		opts = append(opts, www.VoteOption{
+			Id:          v.Id,
+			Description: v.Description,
+			Bits:        v.Bits,
+		})
+	}
+	return www.StartVote{
+		PublicKey: sv.PublicKey,
+		Vote: www.Vote{
+			Token:            sv.Vote.Token,
+			Mask:             sv.Vote.Mask,
+			Duration:         sv.Vote.Duration,
+			QuorumPercentage: sv.Vote.QuorumPercentage,
+			PassPercentage:   sv.Vote.PassPercentage,
+			Options:          opts,
+		},
+		Signature: sv.Signature,
+	}
+}
+
+func convertStartVoteReplyFromBitum(svr bitumplugin.StartVoteReply) www.StartVoteReply {
+	return www.StartVoteReply{
+		StartBlockHeight: svr.StartBlockHeight,
+		StartBlockHash:   svr.StartBlockHash,
+		EndHeight:        svr.EndHeight,
+		EligibleTickets:  svr.EligibleTickets,
+	}
+}
+
+func convertVoteDetailsReplyFromBitum(vdr bitumplugin.VoteDetailsReply) VoteDetails {
+	av, avr := convertAuthVoteFromBitum(vdr.AuthorizeVote)
+	return VoteDetails{
+		AuthorizeVote:      av,
+		AuthorizeVoteReply: avr,
+		StartVote:          convertStartVoteFromBitum(vdr.StartVote),
+		StartVoteReply:     convertStartVoteReplyFromBitum(vdr.StartVoteReply),
+	}
+}
+
+func convertCastVoteFromBitum(cv bitumplugin.CastVote) www.CastVote {
+	return www.CastVote{
+		Token:     cv.Token,
+		Ticket:    cv.Ticket,
+		VoteBit:   cv.VoteBit,
+		Signature: cv.Signature,
+	}
+}
+
+func convertCastVotesFromBitum(cv []bitumplugin.CastVote) []www.CastVote {
+	cvr := make([]www.CastVote, 0, len(cv))
+	for _, v := range cv {
+		cvr = append(cvr, convertCastVoteFromBitum(v))
+	}
+	return cvr
+}
+
+func convertVoteResultsReplyFromBitum(vrr bitumplugin.VoteResultsReply) (www.StartVote, []www.CastVote) {
+	sv := convertStartVoteFromBitum(vrr.StartVote)
+	cv := convertCastVotesFromBitum(vrr.CastVotes)
+	return sv, cv
+}
+
+func convertPluginSettingFromPD(ps pd.PluginSetting) PluginSetting {
+	return PluginSetting{
+		Key:   ps.Key,
+		Value: ps.Value,
+	}
+}
+
+func convertPluginFromPD(p pd.Plugin) Plugin {
+	ps := make([]PluginSetting, 0, len(p.Settings))
+	for _, v := range p.Settings {
+		ps = append(ps, convertPluginSettingFromPD(v))
+	}
+	return Plugin{
+		ID:       p.ID,
+		Version:  p.Version,
+		Settings: ps,
+	}
+}
+func convertVoteOptionResultsFromBitum(vor []bitumplugin.VoteOptionResult) []www.VoteOptionResult {
+	r := make([]www.VoteOptionResult, 0, len(vor))
+	for _, v := range vor {
+		r = append(r, www.VoteOptionResult{
+			Option: www.VoteOption{
+				Id:          v.ID,
+				Description: v.Description,
+				Bits:        v.Bits,
+			},
+			VotesReceived: v.Votes,
+		})
+	}
+	return r
+}
+
+func convertTokenInventoryReplyFromBitum(r bitumplugin.TokenInventoryReply) www.TokenInventoryReply {
+	return www.TokenInventoryReply{
+		Pre:       r.Pre,
+		Active:    r.Active,
+		Approved:  r.Approved,
+		Rejected:  r.Rejected,
+		Abandoned: r.Abandoned,
+	}
+}
+
+func convertInvoiceFileFromWWW(f *www.File) []pd.File {
+	return []pd.File{{
+		Name:    "invoice.csv",
+		MIME:    "text/plain; charset=utf-8",
+		Digest:  f.Digest,
+		Payload: f.Payload,
+	}}
+}
+
+func convertInvoiceCensorFromWWW(f www.CensorshipRecord) pd.CensorshipRecord {
+	return pd.CensorshipRecord{
+		Token:     f.Token,
+		Merkle:    f.Merkle,
+		Signature: f.Signature,
+	}
+}
+
+func convertInvoiceCensorFromPD(f pd.CensorshipRecord) www.CensorshipRecord {
+	return www.CensorshipRecord{
+		Token:     f.Token,
+		Merkle:    f.Merkle,
+		Signature: f.Signature,
+	}
+}
+
+func convertRecordFileToWWW(f pd.File) www.File {
+	return www.File{
+		Name:    f.Name,
+		MIME:    f.MIME,
+		Digest:  f.Digest,
+		Payload: f.Payload,
+	}
+}
+
+func convertRecordFilesToWWW(f []pd.File) []www.File {
+	files := make([]www.File, 0, len(f))
+	for _, v := range f {
+		files = append(files, convertRecordFileToWWW(v))
+	}
+	return files
+}
+
+func convertDatabaseInvoiceToInvoiceRecord(dbInvoice cmsdatabase.Invoice) *cms.InvoiceRecord {
+	invRec := &cms.InvoiceRecord{}
+	invRec.Status = dbInvoice.Status
+	invRec.Timestamp = dbInvoice.Timestamp
+	invRec.UserID = dbInvoice.UserID
+	invRec.PublicKey = dbInvoice.PublicKey
+	invRec.Version = dbInvoice.Version
+
+	invInput := cms.InvoiceInput{
+		ContractorContact:  dbInvoice.ContractorContact,
+		ContractorRate:     dbInvoice.ContractorRate,
+		ContractorName:     dbInvoice.ContractorName,
+		ContractorLocation: dbInvoice.ContractorLocation,
+		PaymentAddress:     dbInvoice.PaymentAddress,
+		Month:              dbInvoice.Month,
+		Year:               dbInvoice.Year,
+		ExchangeRate:       dbInvoice.ExchangeRate,
+	}
+	invInputLineItems := make([]cms.LineItemsInput, 0, len(dbInvoice.LineItems))
+	for _, dbLineItem := range dbInvoice.LineItems {
+		lineItem := cms.LineItemsInput{
+			Type:          dbLineItem.Type,
+			Domain:        dbLineItem.Domain,
+			Subdomain:     dbLineItem.Subdomain,
+			Description:   dbLineItem.Description,
+			ProposalToken: dbLineItem.ProposalURL,
+			Labor:         dbLineItem.Labor,
+			Expenses:      dbLineItem.Expenses,
+		}
+		invInputLineItems = append(invInputLineItems, lineItem)
+	}
+	invRec.Input = invInput
+	return invRec
+}
+
+func convertLineItemsToDatabase(token string, l []cms.LineItemsInput) []cmsdatabase.LineItem {
+	dl := make([]cmsdatabase.LineItem, 0, len(l))
+	for _, v := range l {
+		dl = append(dl, cmsdatabase.LineItem{
+			InvoiceToken: token,
+			Type:         v.Type,
+			Domain:       v.Domain,
+			Subdomain:    v.Subdomain,
+			Description:  v.Description,
+			ProposalURL:  v.ProposalToken,
+			Labor:        v.Labor,
+			Expenses:     v.Expenses,
+		})
+	}
+	return dl
+}
+
+func convertRecordToDatabaseInvoice(p pd.Record) (*cmsdatabase.Invoice, error) {
+	dbInvoice := cmsdatabase.Invoice{
+		Files:           convertRecordFilesToWWW(p.Files),
+		Token:           p.CensorshipRecord.Token,
+		ServerSignature: p.CensorshipRecord.Signature,
+		Version:         p.Version,
+	}
+
+	// Decode invoice file
+	for _, v := range p.Files {
+		if v.Name == invoiceFile {
+			b, err := base64.StdEncoding.DecodeString(v.Payload)
+			if err != nil {
+				return nil, err
+			}
+
+			var ii cms.InvoiceInput
+			err = json.Unmarshal(b, &ii)
+			if err != nil {
+				return nil, www.UserError{
+					ErrorCode: www.ErrorStatusInvalidInput,
+				}
+			}
+
+			dbInvoice.Month = ii.Month
+			dbInvoice.Year = ii.Year
+			dbInvoice.ExchangeRate = ii.ExchangeRate
+			dbInvoice.LineItems = convertLineItemsToDatabase(dbInvoice.Token,
+				ii.LineItems)
+			dbInvoice.ContractorContact = ii.ContractorContact
+			dbInvoice.ContractorLocation = ii.ContractorLocation
+			dbInvoice.ContractorRate = ii.ContractorRate
+			dbInvoice.ContractorName = ii.ContractorName
+			dbInvoice.PaymentAddress = ii.PaymentAddress
+		}
+	}
+
+	for _, m := range p.Metadata {
+		switch m.ID {
+		case mdStreamInvoiceGeneral:
+			var mdGeneral backendInvoiceMetadata
+			err := json.Unmarshal([]byte(m.Payload), &mdGeneral)
+			if err != nil {
+				return nil, fmt.Errorf("could not decode metadata '%v' token '%v': %v",
+					p.Metadata, p.CensorshipRecord.Token, err)
+			}
+
+			dbInvoice.Timestamp = mdGeneral.Timestamp
+			dbInvoice.PublicKey = mdGeneral.PublicKey
+			dbInvoice.UserSignature = mdGeneral.Signature
+
+		case mdStreamInvoiceStatusChanges:
+			sc, err := decodeBackendInvoiceStatusChanges([]byte(m.Payload))
+			if err != nil {
+				return nil, fmt.Errorf("could not decode metadata '%v' token '%v': %v",
+					m, p.CensorshipRecord.Token, err)
+			}
+
+			// We don't need all of the status changes.
+			// Just the most recent one.
+			for _, s := range sc {
+				dbInvoice.Status = s.NewStatus
+			}
+
+		default:
+			// Log error but proceed
+			log.Errorf("initializeInventory: invalid "+
+				"metadata stream ID %v token %v",
+				m.ID, p.CensorshipRecord.Token)
+		}
+	}
+
+	return &dbInvoice, nil
+}
+
+func convertInvoiceFromCache(r cache.Record) cms.InvoiceRecord {
+	// Decode metadata streams
+	var md backendInvoiceMetadata
+	var c backendInvoiceStatusChange
+	for _, v := range r.Metadata {
+		switch v.ID {
+		case mdStreamInvoiceGeneral:
+			// General invoice metadata
+			m, err := decodeBackendInvoiceMetadata([]byte(v.Payload))
+			if err != nil {
+				log.Errorf("convertInvoiceFromCache: decode md stream: "+
+					"token:%v error:%v payload:%v",
+					r.CensorshipRecord.Token, err, v)
+			}
+			md = *m
+
+		case mdStreamInvoiceStatusChanges:
+			// Invoice status changes
+			m, err := decodeBackendInvoiceStatusChanges([]byte(v.Payload))
+			if err != nil {
+				log.Errorf("convertInvoiceFromCache: decode md stream: "+
+					"token:%v error:%v payload:%v",
+					r.CensorshipRecord.Token, err, v)
+			}
+
+			// We don't need all of the status changes.
+			// Just the most recent one.
+			for _, s := range m {
+				c = s
+			}
+		}
+	}
+
+	// Convert files
+	var ii cms.InvoiceInput
+	fs := make([]www.File, 0, len(r.Files))
+	for _, v := range r.Files {
+		f := www.File{
+			Name:    v.Name,
+			MIME:    v.MIME,
+			Digest:  v.Digest,
+			Payload: v.Payload,
+		}
+		fs = append(fs, f)
+
+		// Parse invoice json
+		if f.Name == invoiceFile {
+			b, err := base64.StdEncoding.DecodeString(v.Payload)
+			if err != nil {
+				log.Errorf("convertInvoiceFromCache: decode invoice: "+
+					"token:%v error:%v payload:%v",
+					r.CensorshipRecord.Token, err, f.Payload)
+				continue
+			}
+
+			err = json.Unmarshal(b, &ii)
+			if err != nil {
+				log.Errorf("convertInvoiceFromCache: unmarshal InvoiceInput: "+
+					"token:%v error:%v payload:%v",
+					r.CensorshipRecord.Token, err, f.Payload)
+				continue
+			}
+		}
+	}
+
+	// UserID and Username are left intentionally blank.
+	// These fields not part of a cache record.
+	return cms.InvoiceRecord{
+		Status:             c.NewStatus,
+		StatusChangeReason: c.Reason,
+		Timestamp:          r.Timestamp,
+		UserID:             "",
+		Username:           "",
+		PublicKey:          md.PublicKey,
+		Signature:          md.Signature,
+		Files:              fs,
+		Version:            r.Version,
+		CensorshipRecord: www.CensorshipRecord{
+			Token:     r.CensorshipRecord.Token,
+			Merkle:    r.CensorshipRecord.Merkle,
+			Signature: r.CensorshipRecord.Signature,
+		},
+		Input: ii,
+	}
+}
