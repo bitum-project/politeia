@@ -30,7 +30,7 @@ const (
 	defaultHost              = "https://proposals.bitum.io/api"
 	defaultFaucetHost        = "https://faucet.bitum.io/requestfaucet"
 	defaultWalletHost        = "127.0.0.1"
-	defaultWalletTestnetPort = "19111"
+	defaultWalletTestnetPort = "19211"
 
 	userFile     = "user.txt"
 	csrfFile     = "csrf.txt"

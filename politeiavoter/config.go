@@ -29,8 +29,8 @@ const (
 	defaultLogFilename    = "politeiavoter.log"
 	defaultWalletHost     = "127.0.0.1"
 
-	defaultWalletMainnetPort = "9111"
-	defaultWalletTestnetPort = "19111"
+	defaultWalletMainnetPort = "9211"
+	defaultWalletTestnetPort = "19211"
 )
 
 var (
